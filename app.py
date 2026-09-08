@@ -76,6 +76,12 @@ def launch(name: str, source: str, params: dict, resume: bool) -> None:
         cmd += ["--track-face"]
     if params.get("upload"):
         cmd += ["--upload"]
+    if params.get("style"):
+        cmd += ["--style", str(params["style"])]
+    if params.get("max_clip_secs"):
+        cmd += ["--max-clip-secs", str(params["max_clip_secs"])]
+    if not params.get("subtitles_bg", True):
+        cmd += ["--no-bg"]
     if resume:
         cmd += ["--resume"]
 
@@ -147,6 +153,23 @@ def page():
     track = c6.checkbox("Face-tracking", value=False)
     upload = c7.checkbox("Subir a Zernio", value=False)
 
+    subtitles_bg = st.checkbox("Fondo negro en subtítulos", value=True,
+                               disabled=not subtitles,
+                               help="Off = sin fondo ni glow, solo color + escala.")
+
+    style = st.selectbox(
+        "Estilo de subtítulos",
+        ["hormozi", "mrbeast", "karaoke", "minimal", "bounce", "classic"],
+        index=0, disabled=not subtitles,
+        help="Hormozi (cian), MrBeast (amarillo), Karaoke (wipe), Minimal (scale), Bounce, Classic (amarillo).",
+    )
+
+    max_clip_secs = st.selectbox(
+        "Duración máx por short",
+        [60, 30, 15], index=0,
+        help="Recorta cada clip a ≤ esta duración, cortando en fin de frase para mantener el tema coherente.",
+    )
+
     sub, gen, clr = st.columns([2, 2, 2])
     with sub:
         resume = st.checkbox("Reintentar desde donde quedó", value=False,
@@ -164,7 +187,8 @@ def page():
 
     params = {
         "num_clips": num_clips, "quality": quality, "ratio": ratio, "language": language,
-        "subtitles": subtitles, "track": track, "upload": upload,
+        "subtitles": subtitles, "track": track, "upload": upload, "style": style,
+        "max_clip_secs": max_clip_secs, "subtitles_bg": subtitles_bg,
     }
 
     if generate and default_name and src_url:
@@ -192,6 +216,16 @@ def _render_status(name: str, params: dict):
     with st.container(border=True):
         st.subheader(f"Proyecto: {name}")
 
+        rc_file = out_dir / "run.rc"
+        active = run_is_active(name)
+        # ¿Hubo alguna generación (en curso o pasada)?
+        had_run = active or (out_dir / "run.rc").exists() or (out_dir / "result.json").exists() \
+            or any((out_dir / "shorts").glob("short_*.mp4")) if (out_dir / "shorts").exists() else False
+
+        if not active and not had_run:
+            st.info("Aún no se generó nada para este proyecto. Configura y pulsa **Generar**.")
+            return
+
         # steps
         steps = st.status("Generando...", expanded=True) if active else st.status("Estado", expanded=True)
         with steps:
@@ -203,7 +237,8 @@ def _render_status(name: str, params: dict):
                 else:
                     st.write(f"○ {s}")
         if not active:
-            steps.update(label="Terminado", state="complete" if (rc_file.exists() and rc_file.read_text().strip() == "0") else "error")
+            ok = rc_file.exists() and rc_file.read_text().strip() == "0"
+            steps.update(label="Terminado", state="complete" if ok else "error")
 
         st.progress(min(done / max(total, 1), 1.0))
 
