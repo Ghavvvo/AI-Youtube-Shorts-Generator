@@ -126,9 +126,15 @@ def page():
     st.title("Shorts Studio")
     st.caption("Pipeline local: descargar → transcribir → rank → crop → subtítulos → upload")
 
-    default_name = st.text_input("Nombre del proyecto", value="proyecto",
-                                 help="Se usa como carpeta en output/<nombre>/")
     src_url = st.text_input("URL de YouTube o ruta local", placeholder="https://www.youtube.com/... o /ruta/video.mp4")
+
+    # Nombre automático del proyecto derivado del source (editable).
+    from shorts_generator.local.naming import project_name
+
+    auto_name = project_name(src_url) if src_url else "proyecto"
+    default_name = st.text_input("Nombre del proyecto (se deriva del video; puedes cambiarlo)",
+                                 value=auto_name,
+                                 help="Se usa como carpeta en output/<nombre>/")
 
     c1, c2, c3, c4 = st.columns(4)
     num_clips = c1.slider("Shorts", 1, 10, 3)
