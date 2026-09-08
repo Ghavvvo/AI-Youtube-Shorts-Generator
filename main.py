@@ -37,6 +37,13 @@ def main() -> int:
     parser.add_argument("--track-face", action="store_true", help="Face-tracking vertical crop (local mode, default off)")
     parser.add_argument("--upload", action="store_true", help="Upload finished shorts to Zernio (local mode)")
     parser.add_argument("--resume", action="store_true", help="Reanudar desde la última etapa cacheada (local mode)")
+    parser.add_argument("--style", default="hormozi",
+                        choices=["hormozi", "mrbeast", "karaoke", "minimal", "bounce", "classic"],
+                        help="Estilo de subtítulos (local mode): hormozi/mrbeast/karaoke/minimal/bounce/classic")
+    parser.add_argument("--max-clip-secs", type=int, default=60, choices=[15, 30, 60],
+                        help="Duración máxima por short (15/30/60s, default 60). Recorta en límite de frase coherente.")
+    parser.add_argument("--no-bg", action="store_true",
+                        help="Subtítulos sin fondo negro ni glow (solo color + escala)")
     args = parser.parse_args()
 
     # Si LOCAL_PROGRESS_FILE está seteado, escribimos el progreso por etapa ahí
@@ -63,6 +70,9 @@ def main() -> int:
             upload=args.upload,
             resume=args.resume,
             on_progress=_progress,
+            subtitles_style=args.style,
+            max_clip_secs=args.max_clip_secs,
+            subtitles_bg=not args.no_bg,
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)
