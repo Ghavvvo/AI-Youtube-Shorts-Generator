@@ -17,6 +17,33 @@ from .transcriber import transcribe
 STAGE_NAMES = ("download", "transcribe", "rank", "crop", "subtitles", "upload")
 
 
+def _clamp_highlight(h: Dict, words: List[Dict], max_secs: int) -> Dict:
+    """Recorta un highlight a ≤ max_secs cortando en límite de palabra coherente.
+
+    Prioriza el fin de frase (word terminada en .?!…) dentro de la ventana; si no
+    existe, usa el último límite de palabra ≤ start+max. Así el clip inicia/cierra
+    en un único tema con texto coherente, no a cuchillo.
+    """
+    start = float(h["start_time"])
+    end = float(h["end_time"])
+    if end - start <= max_secs:
+        return h
+    hard_end = start + max_secs
+    in_win = [w for w in words if w["start"] >= start and w["end"] <= hard_end + 0.05]
+    cut = hard_end
+    if in_win:
+        # preferir corte en fin de frase; si no, el último límite de palabra
+        sentence_end = [
+            w["end"] for w in in_win
+            if (w.get("word") or "").rstrip()[-1:] in ".!?…"
+        ]
+        if sentence_end:
+            cut = min(sentence_end[-1], hard_end)
+        else:
+            cut = min(in_win[-1]["end"], hard_end)
+    return {**h, "start_time": start, "end_time": cut}
+
+
 def _run_local(
     youtube_url: str,
     num_clips: int,
@@ -29,6 +56,9 @@ def _run_local(
     resume: bool = False,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     out_dir: Optional[str] = None,
+    subtitles_style: str = "hormozi",
+    max_clip_secs: int = 60,
+    subtitles_bg: bool = True,
 ) -> Dict:
     from .local.clipper import crop_highlights_local
     from .local.downloader import download_youtube_local
@@ -72,6 +102,15 @@ def _run_local(
     top = sorted(all_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
     print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates", flush=True)
 
+    # recortar a duración máxima (max_clip_secs) cortando en límite de frase/palabra
+    words = [
+        {"start": float(wi["start"]), "end": float(wi["end"]), "word": wi.get("word", "")}
+        for seg in transcript.get("segments", []) for wi in seg.get("words", [])
+    ]
+    if max_clip_secs and words:
+        top = [_clamp_highlight(h, words, max_clip_secs) for h in top]
+        print(f"[pipeline/local] duración máx {max_clip_secs}s aplicada", flush=True)
+
     # 4. crop
     emit("crop", 4, "Crop vertical...")
     shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio,
@@ -81,7 +120,8 @@ def _run_local(
     if subtitles:
         emit("subtitles", 5, "Quemando subtítulos...")
         from .local.subtitles import burn_subtitles_for_shorts
-        shorts = burn_subtitles_for_shorts(shorts, transcript, resume=resume)
+        shorts = burn_subtitles_for_shorts(shorts, transcript, resume=resume,
+                                           style=subtitles_style, background=subtitles_bg)
 
     # 6. upload
     if upload:
@@ -146,6 +186,9 @@ def generate_shorts(
     resume: bool = False,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     out_dir: Optional[str] = None,
+    subtitles_style: str = "hormozi",
+    max_clip_secs: int = 60,
+    subtitles_bg: bool = True,
 ) -> Dict:
     """Run the full pipeline and return a structured result.
 
@@ -179,6 +222,8 @@ def generate_shorts(
             youtube_url, num_clips, aspect_ratio, download_format, language,
             subtitles=subtitles, face_tracking=face_tracking, upload=upload,
             resume=resume, on_progress=on_progress, out_dir=out_dir,
+            subtitles_style=subtitles_style, max_clip_secs=max_clip_secs,
+            subtitles_bg=subtitles_bg,
         )
     if mode == "api":
         return _run_api(youtube_url, num_clips, aspect_ratio, download_format, language)
