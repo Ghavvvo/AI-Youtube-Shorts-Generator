@@ -1,103 +1,194 @@
-"""Burn word-chunked yellow/bold subtitles onto each short (stage 5 del pipeline local).
+r"""Burn word-timed animated subtitles onto each short (stage 5 del pipeline local).
 
-Toma los segments de la transcripción, los ventanea al clip [start,end], los
-trocea en bloques de N palabras en MAYÚSCULAS y los quema vía ASS + ffmpeg.
+Puerto del enfoque de ai-video-captions (MIT, autoshorts):
+  - word-level timestamps reales (words[] de faster-whisper)
+  - ASS generado con pysubs2: agrupa palabras por caracteres, un evento por
+    palabra con la línea completa y tags de animación en la palabra activa
+    (highlight \c, karaoke \kf, scale \fscx, bounce \t) — libass hace el
+    layout natural (sin \pos manual → sin scatter)
+  - 6 estilos: hormozi / mrbeast / karaoke / minimal / bounce / classic
+  - quema con ffmpeg subtitles filter
 """
-import os
-import subprocess
-from typing import Dict, List, Tuple
 
-from ..config import LOCAL_SUBTITLE_WORDS
+from typing import Dict, List
 
+from .caption_styles import get_style
 
-def _format_srt_timestamp(seconds: float) -> str:
-    ms = int(round(seconds * 1000))
-    h, rem = divmod(ms, 3600000)
-    m, rem = divmod(rem, 60000)
-    s, ms = divmod(rem, 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
-def _ass_time(seconds: float) -> str:
-    cs = int(round(seconds * 100))
-    h, rem = divmod(cs, 360000)
-    m, rem = divmod(rem, 6000)
-    s, cc = divmod(rem, 100)
-    return f"{h}:{m:02d}:{s:02d}.{cc:02d}"
+MAX_CHARS_PER_LINE = 18
+POSITION_PCT = 19  # % desde abajo — punto medio entre el borde inferior y la posición anterior (38%)
 
 
 def _escape_ass_text(text: str) -> str:
     return text.replace("{", "\\{").replace("}", "\\}")
 
 
-def _probe_frame_size(path: str) -> Tuple[int, int]:
-    import cv2  # type: ignore
-    cap = cv2.VideoCapture(path)
-    try:
-        return (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-    finally:
-        cap.release()
+def _wrap_words(words: List[Dict]) -> List[tuple]:
+    """Agrupa palabras (con su timing relativo al clip) en subtítulos de ≤N chars."""
+    subtitles = []
+    current: List[tuple] = []
+    current_chars = 0
+    cur_start = 0.0
+    cur_end = 0.0
+    for w in words:
+        start = float(w["start"])
+        end = float(w["end"])
+        text = _escape_ass_text(w["word"].upper())
+        if not current:
+            current = [(text, start, end)]
+            current_chars = len(w["word"])
+            cur_start = start
+            cur_end = end
+            continue
+        if current_chars + 1 + len(w["word"]) <= MAX_CHARS_PER_LINE:
+            current.append((text, start, end))
+            current_chars += 1 + len(w["word"])
+            cur_end = end
+        else:
+            subtitles.append((cur_start, cur_end, current))
+            current = [(text, start, end)]
+            current_chars = len(w["word"])
+            cur_start = start
+            cur_end = end
+    if current:
+        subtitles.append((cur_start, cur_end, current))
+    return subtitles
 
 
-def _window_segments(segments: List[Dict], start_time: float, end_time: float) -> List[Dict]:
-    return [
-        {
-            "start": max(0.0, seg["start"] - start_time),
-            "end": min(end_time, seg["end"]) - start_time,
-            "text": seg["text"],
-        }
-        for seg in segments
-        if seg["start"] < end_time and seg["end"] > start_time
-    ]
+def _active_word_tag(word: str, start: float, end: float, style: dict) -> str:
+    """Aplica el tag de la palabra activa según la animación del estilo.
 
-
-def _chunk_words(segments: List[Dict], words_per_block: int) -> List[Dict]:
-    blocks = []
-    for seg in segments:
-        words = seg["text"].split()
-        chunks = [
-            " ".join(words[k:k + words_per_block]).upper()
-            for k in range(0, len(words), words_per_block)
-        ]
-        total = sum(len(c) for c in chunks)
-        span = seg["end"] - seg["start"]
-        cum = 0
-        for chunk in chunks:
-            start_s = seg["start"] + (span * cum / total if total else 0.0)
-            cum += len(chunk)
-            end_s = seg["start"] + (span * cum / total if total else 0.0)
-            blocks.append({"start": start_s, "end": end_s, "text": chunk})
-    return blocks
-
-
-def _write_ass(blocks: List[Dict], ass_path: str, width: int, height: int) -> str:
-    """Escribe bloques → ASS amarillo/bold/outlined; devuelve ass_path."""
-    size = max(16, round(height * 0.062))
-    lines = [
-        "[Script Info]",
-        "ScriptType: v4.00+",
-        f"PlayResX: {width}",
-        f"PlayResY: {height}",
-        "WrapStyle: 0",
-        "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,DejaVu Sans,{size},&H0000FFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2,0,2,20,20,40,1",
-        "",
-        "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    ]
-    for b in blocks:
-        lines.append(
-            f"Dialogue: 0,{_ass_time(b['start'])},{_ass_time(b['end'])},"
-            f"Default,,0,0,0,,{_escape_ass_text(b['text'])}"
+    Todos los estilos crecen (\fscx) y funden el highlight con \t (transición
+    suave de color) — la palabra no "salta", crece y se ilumina progresivamente.
+    """
+    hl = style["highlight"]
+    anim = style.get("animation", "highlight")
+    if anim == "karaoke":
+        dur_cs = max(10, int((end - start) * 100)) if end > start else 30
+        return f"{{\\kf{dur_cs}\\c{hl}}}{word}{{\\r}}"
+    if anim == "bounce":
+        return (
+            f"{{\\t(0,50,\\fscx120\\fscy120)\\t(50,100,\\fscx100\\fscy100)"
+            f"\\c{hl}}}{word}{{\\r}}"
         )
-    with open(ass_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    return ass_path
+    # scale y highlight (default): relleno SOLIDO del color highlight (letras de
+    # color fijo) + crecimiento animado. El glow interior va en capa aparte.
+    return f"{{\\fscx115\\fscy115\\1c{hl}\\t(0,120,\\fscx100\\fscy100)}}{word}{{\\r}}"
+
+
+def _build_event_text(words: List[tuple], active_idx: int, style: dict) -> str:
+    """Línea completa; la palabra activa con tag de animación, el resto blancas."""
+    parts = []
+    for i, (word, start, end) in enumerate(words):
+        if i == active_idx:
+            parts.append(_active_word_tag(word, start, end, style))
+        else:
+            parts.append(word)
+    return " ".join(parts)
+
+
+def _build_glow_event_text(words: List[tuple], active_idx: int, style: dict,
+                           background: bool = True) -> str:
+    """Copia de la línea SOLO para el halo interior: la palabra activa se dibuja
+    rellena del highlight con blur ajustado al glifo (la luz emana de dentro).
+    El resto completamente transparente (conserva el ancho para centrado).
+
+    Con background=False (sin outline negro) la silueta se reduce mucho para
+    no quemar las letras vecinas.
+    """
+    hl = style["highlight"]
+    if background:
+        bord_blur = "\\bord3\\blur3.5"
+    else:
+        bord_blur = "\\bord0.8\\blur1.2"
+    parts = []
+    for i, (word, _start, _end) in enumerate(words):
+        if i == active_idx:
+            parts.append(f"{{\\1c{hl}\\3c{hl}{bord_blur}\\shad0}}{word}")
+        else:
+            parts.append(f"{{\\1a&HFF&\\bord0\\shad0}}{word}")
+    return " ".join(parts)
+
+
+def generate_ass(
+    transcript: Dict,
+    clip_start: float,
+    clip_end: float,
+    out_path: str,
+    width: int,
+    height: int,
+    style_id: str = "hormozi",
+    background: bool = True,
+) -> bool:
+    """Genera el .ass animado para un clip. False si no hay palabras en el rango."""
+    import pysubs2
+
+    style = get_style(style_id)
+
+    # palabras del transcript dentro del rango del clip (relativas al clip)
+    words = []
+    for seg in transcript.get("segments", []):
+        for wi in seg.get("words", []):
+            ws = float(wi.get("start"))
+            we = float(wi.get("end"))
+            if we > clip_start and ws < clip_end:
+                words.append({
+                    "word": wi.get("word", "").strip(),
+                    "start": max(0.0, ws - clip_start),
+                    "end": max(0.0, we - clip_start),
+                })
+    words = [w for w in words if w["word"]]
+    if not words:
+        return False
+
+    groups = _wrap_words(words)
+
+    subs = pysubs2.SSAFile()
+    subs.info["WrapStyle"] = 3
+    subs.info["PlayResX"] = width
+    subs.info["PlayResY"] = height
+
+    s = pysubs2.SSAStyle()
+    s.fontname = style["font"]
+    s.fontsize = max(24, round(height * style.get("font_size", 0.055)))
+    s.primarycolor = pysubs2.Color(255, 255, 255, 0)  # blanco opaco (primary en ASS-BGR)
+    s.bold = bool(style.get("bold", True))
+    s.italic = bool(style.get("italic", False))
+    s.outline = style.get("outline_size", 4.0) if background else 0.0
+    s.outlinecolor = pysubs2.Color(0, 0, 0, 0)
+    s.shadow = style.get("shadow_depth", 3.0) if background else 0.0
+    s.shadowcolor = pysubs2.Color(0, 0, 0, int(style.get("shadow_alpha", 128)))
+    s.alignment = pysubs2.Alignment.BOTTOM_CENTER
+    s.marginv = int(height * POSITION_PCT / 100)
+    subs.styles["Default"] = s
+
+    for start, end, group in groups:
+        for i in range(len(group)):
+            event_start = group[i][1]
+            event_end = group[i + 1][1] if i + 1 < len(group) else end
+            # capa glow (detrás): solo con background activo (sin bg = sin glow)
+            if background and style.get("animation", "highlight") not in ("karaoke", "bounce"):
+                subs.events.append(pysubs2.SSAEvent(
+                    layer=0,
+                    start=pysubs2.make_time(s=event_start),
+                    end=pysubs2.make_time(s=event_end),
+                    text=_build_glow_event_text(group, i, style, background),
+                    style="Default",
+                ))
+            # texto principal (delante)
+            subs.events.append(pysubs2.SSAEvent(
+                layer=1,
+                start=pysubs2.make_time(s=event_start),
+                end=pysubs2.make_time(s=event_end),
+                text=_build_event_text(group, i, style),
+                style="Default",
+            ))
+
+    subs.save(out_path)
+    return True
 
 
 def _burn_ass(in_path: str, ass_path: str, out_path: str) -> None:
+    import subprocess
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", in_path,
@@ -111,23 +202,30 @@ def _burn_ass(in_path: str, ass_path: str, out_path: str) -> None:
 
 def burn_subtitles_for_short(
     clip_path: str,
-    segments: List[Dict],
+    transcript: Dict,
     start_time: float,
     end_time: float,
     words_per_block: int = None,
+    style: str = "hormozi",
+    background: bool = True,
 ) -> str:
-    """Quema subtítulos en un clip, reemplazando el archivo; devuelve el path."""
-    words_per_block = words_per_block or LOCAL_SUBTITLE_WORDS
-    windowed = _window_segments(segments, start_time, end_time)
-    if not windowed:
-        return clip_path
-    blocks = _chunk_words(windowed, words_per_block)
-    if not blocks:
-        return clip_path
+    """Quema subtítulos en un clip, reemplaza el archivo; devuelve el path."""
+    import os
+    import cv2  # type: ignore
 
-    width, height = _probe_frame_size(clip_path)
+    cap = cv2.VideoCapture(clip_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open {clip_path}")
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
     ass_path = clip_path + ".ass"
-    _write_ass(blocks, ass_path, width, height)
+    ok = generate_ass(transcript, start_time, end_time, ass_path, width, height,
+                      style, background=background)
+    if not ok:
+        return clip_path  # sin palabras en rango → sin subtítulos
+
     burned = clip_path + ".sub.mp4"
     _burn_ass(clip_path, ass_path, burned)
     os.replace(burned, clip_path)
@@ -139,21 +237,20 @@ def burn_subtitles_for_shorts(
     transcript: Dict,
     words_per_block: int = None,
     resume: bool = False,
+    style: str = "hormozi",
+    background: bool = True,
 ) -> List[Dict]:
-    """Quema subtítulos en cada short con clip_url; devuelve shorts actualizados.
-
-    Con resume=True, salta los shorts ya subtitulados (marcador .sub).
-    """
+    """Quema subtítulos en cada short con clip_url; devuelve shorts actualizados."""
+    import os
     from . import resume as _resume
 
-    segments = transcript.get("segments", [])
     out = []
     for s in shorts:
         clip = s.get("clip_url")
         if not clip or not os.path.exists(clip):
             out.append(s)
             continue
-        clip = os.path.abspath(clip)  # rutas relativas → absolutas para marcador/ffmpeg
+        clip = os.path.abspath(clip)
         out_dir = os.path.dirname(clip)
         name = os.path.basename(clip)
         if resume and _resume.subtitled(out_dir, name):
@@ -163,9 +260,11 @@ def burn_subtitles_for_shorts(
         print(f"[subtitles] {s.get('title', '(untitled)')}", flush=True)
         try:
             burn_subtitles_for_short(
-                clip, segments,
+                clip, transcript,
                 float(s["start_time"]), float(s["end_time"]),
                 words_per_block=words_per_block,
+                style=style,
+                background=background,
             )
             _resume.mark_subtitled(out_dir, name)
             out.append(s)
