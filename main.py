@@ -6,6 +6,7 @@ Usage:
 """
 import argparse
 import json
+import os
 import sys
 
 # Windows uses 'charmap' by default, which can't encode Unicode characters
@@ -32,7 +33,22 @@ def main() -> int:
     parser.add_argument("--format", default="720", help="Source download resolution: 360 / 480 / 720 / 1080 (default: 720)")
     parser.add_argument("--language", default=None, help="Force Whisper language code, e.g. 'en' (default: auto-detect)")
     parser.add_argument("--output-json", default=None, help="Write the full result JSON to this path")
+    parser.add_argument("--no-subtitles", action="store_true", help="Don't burn subtitles onto shorts (local mode)")
+    parser.add_argument("--track-face", action="store_true", help="Face-tracking vertical crop (local mode, default off)")
+    parser.add_argument("--upload", action="store_true", help="Upload finished shorts to Zernio (local mode)")
+    parser.add_argument("--resume", action="store_true", help="Reanudar desde la última etapa cacheada (local mode)")
     args = parser.parse_args()
+
+    # Si LOCAL_PROGRESS_FILE está seteado, escribimos el progreso por etapa ahí
+    # (JSON). La GUI detached lo lee para pintar la barra.
+    def _progress(stage: str, done: int, total: int, msg: str = "") -> None:
+        print(f"[progress] {stage} {done}/{total} {msg}", flush=True)
+        if os.environ.get("LOCAL_PROGRESS_FILE"):
+            try:
+                with open(os.environ["LOCAL_PROGRESS_FILE"], "w", encoding="utf-8") as f:
+                    json.dump({"stage": stage, "done": done, "total": total, "message": msg}, f)
+            except OSError:
+                pass
 
     try:
         result = generate_shorts(
@@ -42,6 +58,11 @@ def main() -> int:
             download_format=args.format,
             language=args.language,
             mode=args.mode,
+            subtitles=not args.no_subtitles,
+            face_tracking=args.track_face,
+            upload=args.upload,
+            resume=args.resume,
+            on_progress=_progress,
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)

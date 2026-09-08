@@ -37,8 +37,8 @@ def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> s
     return out_path
 
 
-def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
-    """Crop the cut clip to the target aspect ratio, tracking faces if possible."""
+def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str, track: bool = False) -> str:
+    """Crop the cut clip to the target aspect ratio. If track=True, follow faces."""
     try:
         import cv2  # type: ignore
     except ImportError as e:
@@ -66,7 +66,10 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     crop_w = max(2, crop_w - (crop_w % 2))
     crop_h = max(2, crop_h - (crop_h % 2))
 
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    face_cascade = (
+        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if track else None
+    )
 
     silent_path = out_path + ".silent.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -79,25 +82,27 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
         if not ret:
             break
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
-        if len(faces) > 0:
-            # Pick the largest face — usually the speaker.
-            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-            cx = x + w // 2
-            cy = y + h // 2
+        cx, cy = src_w // 2, src_h // 2
+        if track:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+            if len(faces) > 0:
+                # Pick the largest face — usually the speaker.
+                x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+                fx = x + w // 2
+                fy = y + h // 2
+                if last_center is None:
+                    last_center = (fx, fy)
+                else:
+                    lx, ly = last_center
+                    last_center = (
+                        int(lx + (fx - lx) * smoothing),
+                        int(ly + (fy - ly) * smoothing),
+                    )
             if last_center is None:
-                last_center = (cx, cy)
-            else:
-                lx, ly = last_center
-                last_center = (
-                    int(lx + (cx - lx) * smoothing),
-                    int(ly + (cy - ly) * smoothing),
-                )
-        if last_center is None:
-            last_center = (src_w // 2, src_h // 2)
+                last_center = (src_w // 2, src_h // 2)
+            cx, cy = last_center
 
-        cx, cy = last_center
         x0 = max(0, min(src_w - crop_w, cx - crop_w // 2))
         y0 = max(0, min(src_h - crop_h, cy - crop_h // 2))
         cropped = frame[y0:y0 + crop_h, x0:x0 + crop_w]
@@ -128,12 +133,13 @@ def crop_clip_local(
     end_time: float,
     aspect_ratio: str,
     out_path: str,
+    track: bool = False,
 ) -> str:
     """Cut + reframe one highlight, returning the local mp4 path."""
     cut_path = out_path + ".cut.mp4"
     try:
         _cut_subclip(source_path, start_time, end_time, cut_path)
-        _reframe_vertical(cut_path, out_path, aspect_ratio)
+        _reframe_vertical(cut_path, out_path, aspect_ratio, track=track)
     finally:
         if os.path.exists(cut_path):
             os.remove(cut_path)
@@ -145,12 +151,18 @@ def crop_highlights_local(
     highlights: List[Dict],
     aspect_ratio: str = "9:16",
     out_dir: Optional[str] = None,
+    track: bool = False,
+    resume: bool = False,
 ) -> List[Dict]:
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
     results: List[Dict] = []
     for i, h in enumerate(highlights, 1):
         out_path = os.path.join(out_dir, f"short_{i:02d}.mp4")
+        if resume and os.path.exists(out_path):
+            print(f"[clip/local] resume: reusing {out_path}", flush=True)
+            results.append({**h, "clip_url": out_path})
+            continue
         print(f"[clip/local] {i}/{len(highlights)}: {h.get('title', '(untitled)')}", flush=True)
         try:
             crop_clip_local(
@@ -159,6 +171,7 @@ def crop_highlights_local(
                 float(h["end_time"]),
                 aspect_ratio,
                 out_path,
+                track=track,
             )
             results.append({**h, "clip_url": out_path})
         except Exception as e:
