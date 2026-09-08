@@ -48,8 +48,11 @@ Content type: {content_type} | Density: {density}
 Your task: identify the most viral-worthy highlights from the transcript.
 
 Rules:
+- LANGUAGE: title, hook_sentence and virality_reason MUST be written in the SAME LANGUAGE as the transcript. Spanish transcript → Spanish title/hook; English transcript → English; and so on. Never write them in another language.
+- SINGLE TOPIC: select only self-contained windows that stay on exactly ONE subject. NEVER pick segments that switch between several stories — in particular news roundups, recaps, summaries or "titulares / repaso" sections that list multiple separate events. Trim the window: start it at the beginning of the chosen topic (skip transitions/intro of previous topics) and end it before the next topic begins. Prefer a shorter window that is topically pure over a longer one that leaks another subject.
 - Every highlight must open with a strong HOOK — a line that grabs attention within the first 3 seconds
-- Duration sweet spot: 45-90 seconds. Go shorter (20-44s) only for a perfect standalone one-liner. Go longer (91-180s) only when a story arc needs full context to land
+- DURATION HARD LIMIT: clips MUST be 30-60 seconds. NEVER exceed 60s. If a story arc needs more, pick a shorter self-contained slice instead. Shorter (15-30s) is better than longer when the point is complete.
+- COHERENT WINDOW: the clip must START and END speaking about the SAME single topic, with the speech fully coherent (no mid-sentence cut). Prefer the shortest self-contained window that tells one complete idea.
 - Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
 - Clips must not overlap significantly with each other
 - Score 0-100 on viral potential (not general quality)
