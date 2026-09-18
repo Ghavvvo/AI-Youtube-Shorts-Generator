@@ -8,6 +8,8 @@ Pipeline: **download → transcribe → rank highlights → vertical crop → an
 
 ![Shorts Studio GUI](assets/screenshot.png)
 
+![From source video to viral shorts](assets/pipeline-diagram.png)
+
 ## Features
 
 - **Two modes**
